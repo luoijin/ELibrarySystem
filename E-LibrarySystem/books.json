@@ -1,0 +1,74 @@
+[
+    {
+        "title": "Onyx Storm",
+        "author": "Rebecca Yarros",
+        "isbn": "1",
+        "genre": "Fantasy Romance",
+        "available": true,
+        "date_added": "2025-05-18"
+    },
+    {
+        "title": "Atmosphere",
+        "author": "Taylor Reid",
+        "isbn": "2",
+        "genre": "Historical Romance",
+        "available": true,
+        "date_added": "2025-05-18"
+    },
+    {
+        "title": "Never Flinch",
+        "author": "Stephen King",
+        "isbn": "3",
+        "genre": "Crime Fiction",
+        "available": true,
+        "date_added": "2025-05-18"
+    },
+    {
+        "title": "Redwood Rising",
+        "author": "Tommy Orange",
+        "isbn": "4",
+        "genre": "Contemporary Fiction",
+        "available": true,
+        "date_added": "2025-05-18"
+    },
+    {
+        "title": "Mark Twain",
+        "author": "Ron Chernow",
+        "isbn": "5",
+        "genre": "Biography",
+        "available": true,
+        "date_added": "2025-05-18"
+    },
+    {
+        "title": "Matriarch",
+        "author": "Tina Knowles",
+        "isbn": "6",
+        "genre": "Memoir",
+        "available": true,
+        "date_added": "2025-05-18"
+    },
+    {
+        "title": "Hungerstone",
+        "author": "Kat Dunn",
+        "isbn": "7",
+        "genre": "Gothic Horror",
+        "available": true,
+        "date_added": "2025-05-18"
+    },
+    {
+        "title": "Single Player",
+        "author": "Tara Tai",
+        "isbn": "8",
+        "genre": "Romance",
+        "available": true,
+        "date_added": "2025-05-18"
+    },
+    {
+        "title": "Where Shadows",
+        "author": "Catherine Bakewell",
+        "isbn": "9",
+        "genre": "Fantasy",
+        "available": true,
+        "date_added": "2025-05-18"
+    }
+]
