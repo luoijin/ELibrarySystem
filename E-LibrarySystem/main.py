@@ -1146,9 +1146,9 @@ class UserDashboard(ctk.CTkFrame):
 
         nav_buttons = [
             ("Browse Books", self.show_library),
-            ("My Favorites", self.show_favorites),
-            ("My Borrowed Books", self.show_borrowed),
-            ("My Account", self.show_account)
+            ("Favorites", self.show_favorites),
+            ("Borrowed Books", self.show_borrowed),
+            ("Account", self.show_account)
         ]
 
         for text, command in nav_buttons:
