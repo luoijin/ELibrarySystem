@@ -1,0 +1,24 @@
+[
+    {
+        "role": "Faculty",
+        "student_id": "Faculty",
+        "name": "Prima Dela Rosa",
+        "username": "prima",
+        "password": "prima",
+        "email": "prima@gmail.com",
+        "contact": "09945896698",
+        "address": "Ceb9",
+        "age": "27"
+    },
+    {
+        "role": "Student",
+        "student_id": "23065360",
+        "name": "Anne Loraine Pardillo",
+        "username": "ren",
+        "password": "ren",
+        "email": "ren@gmail.com",
+        "contact": "09945896698",
+        "address": "Ceb9",
+        "age": "21"
+    }
+]
