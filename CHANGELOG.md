@@ -37,8 +37,6 @@ original JSON-based prototype (`import os.txt`, referencing
 
 ## UI / UX Changes
 
-- **No emojis** anywhere in the interface (the original used emojis in
-  places).
 - **Consistent blue accent** (`#1F6AA5`) applied via a single global
   style module (`styles.py`) instead of colours/fonts being set
   per-widget throughout the code.
