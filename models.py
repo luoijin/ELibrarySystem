@@ -9,13 +9,14 @@ These classes are optional convenience wrappers (as permitted by the
 specification) around the raw ``sqlite3.Row`` objects returned by
 ``database.py`` queries. They provide typed, IDE-friendly attribute
 access and small computed properties (e.g. a book's availability
-status) without introducing an ORM dependency.
+status, a patron's borrowing policy) without introducing an ORM
+dependency.
 """
 
 from dataclasses import dataclass
 from typing import Optional
 
-from utils import calculate_fine, is_overdue
+from utils import calculate_fine, is_overdue, get_policy, patron_type_label, DEFAULT_PATRON_TYPE
 
 
 @dataclass
@@ -30,6 +31,7 @@ class User:
     email: Optional[str] = None
     student_id: Optional[str] = None
     contact: Optional[str] = None
+    patron_type: str = DEFAULT_PATRON_TYPE
 
     @classmethod
     def from_row(cls, row) -> "User":
@@ -43,6 +45,7 @@ class User:
             email=row["email"],
             student_id=row["student_id"],
             contact=row["contact"],
+            patron_type=row["patron_type"] if "patron_type" in row.keys() and row["patron_type"] else DEFAULT_PATRON_TYPE,
         )
 
     @property
@@ -52,6 +55,16 @@ class User:
     @property
     def is_patron(self) -> bool:
         return self.role == "patron"
+
+    @property
+    def patron_type_display(self) -> str:
+        """Human-readable patron type label (e.g. 'Student')."""
+        return patron_type_label(self.patron_type)
+
+    @property
+    def policy(self) -> dict:
+        """This patron's borrowing policy (loan days, fine rate, max loans)."""
+        return get_policy(self.patron_type)
 
 
 @dataclass
@@ -65,6 +78,7 @@ class Book:
     publisher: Optional[str]
     year: Optional[int]
     category: str
+    genre: str
     total_copies: int
     available_copies: int
 
@@ -79,6 +93,7 @@ class Book:
             publisher=row["publisher"],
             year=row["year"],
             category=row["category"],
+            genre=row["genre"] if "genre" in row.keys() else "",
             total_copies=row["total_copies"],
             available_copies=row["available_copies"],
         )
@@ -105,6 +120,7 @@ class Transaction:
     # Joined/denormalised display fields (populated by queries that use JOIN)
     book_title: Optional[str] = None
     patron_name: Optional[str] = None
+    patron_type: str = DEFAULT_PATRON_TYPE
 
     @classmethod
     def from_row(cls, row) -> "Transaction":
@@ -120,6 +136,7 @@ class Transaction:
             status=row["status"],
             book_title=row["book_title"] if "book_title" in row.keys() else None,
             patron_name=row["patron_name"] if "patron_name" in row.keys() else None,
+            patron_type=row["patron_type"] if "patron_type" in row.keys() and row["patron_type"] else DEFAULT_PATRON_TYPE,
         )
 
     @property
@@ -135,5 +152,5 @@ class Transaction:
     def current_fine(self) -> float:
         """Fine as of today for active loans, or the stored fine for returned ones."""
         if self.is_active:
-            return calculate_fine(self.due_date)
+            return calculate_fine(self.due_date, patron_type=self.patron_type)
         return self.fine
