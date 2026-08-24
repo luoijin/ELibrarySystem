@@ -2,12 +2,13 @@
 gui/patron_dashboard.py
 ========================
 
-The patron (student / faculty) dashboard. Provides three read-only
-functional areas as required by the specification:
+The patron (student / faculty / staff) dashboard. Provides four
+read-only functional areas as required by the specification:
 
-* Browsing the book catalogue.
+* Browsing the book catalogue (including genre).
 * Viewing currently borrowed books and their fines.
-* Viewing account details.
+* Viewing fines, calculated using the patron's own borrowing policy.
+* Viewing account details, including patron type and policy summary.
 
 Checkout and return are librarian-only operations (performed from the
 ``AdminDashboard``); the patron dashboard is intentionally read-only
@@ -151,6 +152,10 @@ class PatronDashboard(ctk.CTkFrame):
         tree.tag_configure("overdue", foreground=styles.DANGER_COLOR)
         return tree
 
+    @property
+    def _patron_type(self):
+        return self.current_user["patron_type"] if "patron_type" in self.current_user.keys() else utils.DEFAULT_PATRON_TYPE
+
     # ------------------------------------------------------------------
     # Browse Books section
     # ------------------------------------------------------------------
@@ -162,7 +167,7 @@ class PatronDashboard(ctk.CTkFrame):
 
         self.search_entry = ctk.CTkEntry(
             toolbar,
-            placeholder_text="Search by title, author, ISBN or category",
+            placeholder_text="Search by title, author, ISBN, category or genre",
             font=styles.get_font("body"),
             height=styles.ENTRY_HEIGHT,
             width=360,
@@ -193,11 +198,11 @@ class PatronDashboard(ctk.CTkFrame):
             command=self._clear_browse_search,
         ).pack(side="left")
 
-        columns = ("title", "author", "isbn", "publisher", "year", "category", "available", "status")
-        headings = ("Title", "Author", "ISBN", "Publisher", "Year", "Category", "Available", "Status")
-        widths = (220, 150, 110, 130, 60, 120, 75, 95)
+        columns = ("id", "title", "author", "isbn", "category", "genre", "available", "status")
+        headings = ("ID", "Title", "Author", "ISBN", "Category", "Genre", "Available", "Status")
+        widths = (40, 200, 140, 110, 130, 110, 75, 95)
         self.browse_tree = self._make_table(columns, headings, widths)
-        self.browse_tree.column("year", anchor="center")
+        self.browse_tree.column("id", anchor="center")
         self.browse_tree.column("available", anchor="center")
         self.browse_tree.column("status", anchor="center")
 
@@ -221,12 +226,12 @@ class PatronDashboard(ctk.CTkFrame):
                 "",
                 "end",
                 values=(
+                    row["id"],
                     row["title"],
                     row["author"],
                     row["isbn"],
-                    row["publisher"] or "",
-                    row["year"] or "",
                     row["category"],
+                    row["genre"],
                     row["available_copies"],
                     status,
                 ),
@@ -241,10 +246,13 @@ class PatronDashboard(ctk.CTkFrame):
 
         transactions = database.get_transactions_for_user(self.current_user["id"])
         active = [t for t in transactions if t["status"] == "borrowed"]
+        policy = utils.get_policy(self._patron_type)
 
         ctk.CTkLabel(
             self.content,
-            text=f"You currently have {len(active)} book(s) checked out.",
+            text=(
+                f"You currently have {len(active)} of {policy['max_loans']} allowed book(s) checked out."
+            ),
             font=styles.get_font("body"),
             text_color=styles.TEXT_MUTED_COLOR,
         ).pack(anchor="w", pady=(0, styles.PADDING["sm"]))
@@ -257,7 +265,7 @@ class PatronDashboard(ctk.CTkFrame):
         tree.column("status", anchor="center")
 
         for row in active:
-            current_fine = utils.calculate_fine(row["due_date"])
+            current_fine = utils.calculate_fine(row["due_date"], patron_type=self._patron_type)
             overdue = utils.is_overdue(row["due_date"])
             status = "Overdue" if overdue else "On Time"
             tags = ("overdue",) if overdue else ()
@@ -286,7 +294,9 @@ class PatronDashboard(ctk.CTkFrame):
         active = [t for t in transactions if t["status"] == "borrowed"]
         returned = [t for t in transactions if t["status"] == "returned"]
 
-        outstanding_total = sum(utils.calculate_fine(t["due_date"]) for t in active)
+        outstanding_total = sum(
+            utils.calculate_fine(t["due_date"], patron_type=self._patron_type) for t in active
+        )
         historical_total = sum(t["fine"] for t in returned)
 
         summary = ctk.CTkFrame(self.content, fg_color=styles.SURFACE_COLOR, corner_radius=styles.CORNER_RADIUS["md"])
@@ -324,7 +334,7 @@ class PatronDashboard(ctk.CTkFrame):
 
         for row in transactions:
             if row["status"] == "borrowed":
-                fine = utils.calculate_fine(row["due_date"])
+                fine = utils.calculate_fine(row["due_date"], patron_type=self._patron_type)
                 return_date = "-"
                 status_label = "Overdue" if utils.is_overdue(row["due_date"]) else "Borrowed"
             else:
@@ -355,7 +365,7 @@ class PatronDashboard(ctk.CTkFrame):
         self._section_title("My Account")
 
         card = ctk.CTkFrame(self.content, fg_color=styles.SURFACE_COLOR, corner_radius=styles.CORNER_RADIUS["md"])
-        card.pack(fill="x")
+        card.pack(fill="x", pady=(0, styles.PADDING["md"]))
 
         inner = ctk.CTkFrame(card, fg_color="transparent")
         inner.pack(fill="x", padx=styles.PADDING["lg"], pady=styles.PADDING["lg"])
@@ -367,6 +377,7 @@ class PatronDashboard(ctk.CTkFrame):
             ("Email", self.current_user["email"] or "N/A"),
             ("Contact Number", self.current_user["contact"] or "N/A"),
             ("Role", "Patron"),
+            ("Patron Type", utils.patron_type_label(self._patron_type)),
         )
 
         for label_text, value_text in fields:
@@ -379,5 +390,42 @@ class PatronDashboard(ctk.CTkFrame):
             ).pack(side="left")
             ctk.CTkLabel(
                 row, text=str(value_text), font=styles.get_font("body"),
+                text_color=styles.TEXT_MUTED_COLOR, anchor="w",
+            ).pack(side="left")
+
+        # --- Borrowing policy summary --------------------------------------
+        policy = utils.get_policy(self._patron_type)
+        active_loans = database.get_active_loans_count(self.current_user["id"])
+
+        ctk.CTkLabel(
+            self.content,
+            text="Borrowing Policy",
+            font=styles.get_font("subheading", "bold"),
+            text_color=styles.TEXT_COLOR,
+        ).pack(anchor="w", pady=(0, styles.PADDING["xs"]))
+
+        policy_card = ctk.CTkFrame(self.content, fg_color=styles.SURFACE_COLOR, corner_radius=styles.CORNER_RADIUS["md"])
+        policy_card.pack(fill="x")
+
+        policy_inner = ctk.CTkFrame(policy_card, fg_color="transparent")
+        policy_inner.pack(fill="x", padx=styles.PADDING["lg"], pady=styles.PADDING["lg"])
+
+        policy_fields = (
+            ("Loan Period", f"{policy['loan_days']} days"),
+            ("Daily Overdue Fine Rate", utils.format_currency(policy["fine_per_day"])),
+            ("Maximum Simultaneous Loans", str(policy["max_loans"])),
+            ("Current Active Loans", f"{active_loans} / {policy['max_loans']}"),
+        )
+
+        for label_text, value_text in policy_fields:
+            row = ctk.CTkFrame(policy_inner, fg_color="transparent")
+            row.pack(fill="x", pady=styles.PADDING["xs"])
+
+            ctk.CTkLabel(
+                row, text=label_text, font=styles.get_font("body", "bold"),
+                text_color=styles.TEXT_COLOR, width=220, anchor="w",
+            ).pack(side="left")
+            ctk.CTkLabel(
+                row, text=value_text, font=styles.get_font("body"),
                 text_color=styles.TEXT_MUTED_COLOR, anchor="w",
             ).pack(side="left")

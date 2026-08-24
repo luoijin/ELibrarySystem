@@ -5,9 +5,10 @@ database.py
 SQLite persistence layer for the ELibrary System.
 
 This module owns the connection to ``elibrary.db``, creates the schema
-on first run and seeds the database with mock data (books, a librarian
-account and a patron account) so that the application is immediately
-usable after installation.
+on first run, migrates older databases created by previous versions of
+this application, and seeds the database with mock data (books, a
+librarian account and patron accounts) so that the application is
+immediately usable after installation.
 
 Design decisions
 -----------------
@@ -20,17 +21,19 @@ Design decisions
   ``users``, ``books`` and ``transactions``. The ``favorites`` concept
   from the original prototype is intentionally NOT carried over, per
   the project instructions.
-* Passwords are stored as SHA-256 hashes rather than plain text. This
-  was not explicitly requested, but storing credentials in plain text
-  would be a poor practice to reproduce in a rewrite; the assumption
-  is documented in the README. Hashing uses only the Python standard
-  library (``hashlib``), so it does not introduce a new dependency.
+* Passwords are stored as SHA-256 hashes rather than plain text.
+  Hashing uses only the Python standard library (``hashlib``), so it
+  does not introduce a new dependency.
+* ``users.patron_type`` and ``books.genre`` were added in this
+  revision. ``_migrate_schema`` adds these columns with ``ALTER
+  TABLE`` when an older database file (without them) is detected, so
+  upgrading in place never loses existing data.
+* Every listing function used to populate a ``Treeview`` orders its
+  results by ``id ASC`` by default, per the specification.
 """
 
 import sqlite3
 from pathlib import Path
-
-from utils import hash_password, today_str, days_from_today_str
 
 DB_FILENAME = "elibrary.db"
 DB_PATH = Path(__file__).resolve().parent / DB_FILENAME
@@ -53,7 +56,7 @@ def get_connection() -> sqlite3.Connection:
 
 
 def initialize_database() -> None:
-    """Create tables (if needed) and seed mock data on first run.
+    """Create tables (if needed), migrate old schemas, and seed mock data.
 
     This function is idempotent: it can be called every time the
     application starts. Table creation uses ``CREATE TABLE IF NOT
@@ -63,6 +66,7 @@ def initialize_database() -> None:
     connection = get_connection()
     try:
         _create_schema(connection)
+        _migrate_schema(connection)
         _seed_users(connection)
         _seed_books(connection)
         connection.commit()
@@ -71,7 +75,7 @@ def initialize_database() -> None:
 
 
 def _create_schema(connection: sqlite3.Connection) -> None:
-    """Create the users, books and transactions tables."""
+    """Create the users, books and transactions tables (fresh installs)."""
     cursor = connection.cursor()
 
     cursor.execute(
@@ -84,7 +88,8 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             full_name TEXT NOT NULL,
             email TEXT,
             student_id TEXT UNIQUE,
-            contact TEXT
+            contact TEXT,
+            patron_type TEXT DEFAULT 'student' CHECK (patron_type IN ('student', 'faculty', 'staff'))
         )
         """
     )
@@ -99,8 +104,12 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             publisher TEXT,
             year INTEGER,
             category TEXT NOT NULL,
+            genre TEXT NOT NULL DEFAULT 'Non-Fiction',
             total_copies INTEGER NOT NULL DEFAULT 1,
-            available_copies INTEGER NOT NULL DEFAULT 1
+            available_copies INTEGER NOT NULL DEFAULT 1,
+            CHECK (total_copies >= 0),
+            CHECK (available_copies >= 0),
+            CHECK (available_copies <= total_copies)
         )
         """
     )
@@ -123,8 +132,41 @@ def _create_schema(connection: sqlite3.Connection) -> None:
     )
 
 
+def _table_columns(connection: sqlite3.Connection, table_name: str) -> set:
+    cursor = connection.cursor()
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    return {row["name"] for row in cursor.fetchall()}
+
+
+def _migrate_schema(connection: sqlite3.Connection) -> None:
+    """Add columns introduced after the initial release to older databases.
+
+    A database file created by an earlier version of this application
+    will not have ``users.patron_type`` or ``books.genre``. SQLite
+    supports adding columns with ``ALTER TABLE ... ADD COLUMN``, which
+    preserves all existing rows (existing rows receive the column's
+    default value).
+    """
+    cursor = connection.cursor()
+
+    user_columns = _table_columns(connection, "users")
+    if "patron_type" not in user_columns:
+        cursor.execute(
+            "ALTER TABLE users ADD COLUMN patron_type TEXT DEFAULT 'student' "
+            "CHECK (patron_type IN ('student', 'faculty', 'staff'))"
+        )
+        cursor.execute("UPDATE users SET patron_type = 'student' WHERE patron_type IS NULL")
+
+    book_columns = _table_columns(connection, "books")
+    if "genre" not in book_columns:
+        cursor.execute("ALTER TABLE books ADD COLUMN genre TEXT DEFAULT 'Non-Fiction'")
+        cursor.execute("UPDATE books SET genre = 'Non-Fiction' WHERE genre IS NULL")
+
+
 def _seed_users(connection: sqlite3.Connection) -> None:
     """Insert the default librarian and patron accounts if none exist."""
+    from utils import hash_password
+
     cursor = connection.cursor()
     cursor.execute("SELECT COUNT(*) AS count FROM users")
     if cursor.fetchone()["count"] > 0:
@@ -139,6 +181,7 @@ def _seed_users(connection: sqlite3.Connection) -> None:
             "librarian@university.edu",
             None,
             "555-0100",
+            "staff",
         ),
         (
             "23065360",
@@ -148,61 +191,76 @@ def _seed_users(connection: sqlite3.Connection) -> None:
             "alex.morgan@university.edu",
             "23065360",
             "555-0199",
+            "student",
+        ),
+        (
+            "faculty1",
+            hash_password("faculty123"),
+            "patron",
+            "Dr. Maria Santos",
+            "maria.santos@university.edu",
+            "FAC-1001",
+            "555-0212",
+            "faculty",
         ),
     ]
     cursor.executemany(
         """
-        INSERT INTO users (username, password, role, full_name, email, student_id, contact)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO users (username, password, role, full_name, email, student_id, contact, patron_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         default_users,
     )
 
 
 def _seed_books(connection: sqlite3.Connection) -> None:
-    """Insert at least 20 sample books across various categories."""
+    """Insert at least 25 sample books across various categories and genres."""
     cursor = connection.cursor()
     cursor.execute("SELECT COUNT(*) AS count FROM books")
     if cursor.fetchone()["count"] > 0:
         return
 
-    # (title, author, isbn, publisher, year, category, total_copies)
+    # (title, author, isbn, publisher, year, category, genre, total_copies)
     sample_books = [
-        ("Introduction to Algorithms", "Thomas H. Cormen", "9780262033848", "MIT Press", 2009, "Computer Science", 4),
-        ("Clean Code", "Robert C. Martin", "9780132350884", "Prentice Hall", 2008, "Computer Science", 3),
-        ("Design Patterns", "Erich Gamma", "9780201633610", "Addison-Wesley", 1994, "Computer Science", 2),
-        ("Structure and Interpretation of Computer Programs", "Harold Abelson", "9780262510875", "MIT Press", 1996, "Computer Science", 2),
-        ("Database System Concepts", "Abraham Silberschatz", "9780078022159", "McGraw-Hill", 2019, "Computer Science", 3),
-        ("Calculus", "James Stewart", "9781285740621", "Cengage Learning", 2015, "Mathematics", 5),
-        ("Linear Algebra Done Right", "Sheldon Axler", "9783319110790", "Springer", 2015, "Mathematics", 3),
-        ("Introduction to Probability", "Joseph K. Blitzstein", "9781466575578", "CRC Press", 2014, "Mathematics", 2),
-        ("Discrete Mathematics and Its Applications", "Kenneth Rosen", "9780073383095", "McGraw-Hill", 2012, "Mathematics", 4),
-        ("Physics for Scientists and Engineers", "Raymond Serway", "9781133947271", "Cengage Learning", 2013, "Physics", 3),
-        ("Cosmos", "Carl Sagan", "9780345539434", "Ballantine Books", 2013, "Physics", 2),
-        ("Organic Chemistry", "Paula Yurkanis Bruice", "9780134042282", "Pearson", 2016, "Chemistry", 3),
-        ("Campbell Biology", "Lisa A. Urry", "9780134093413", "Pearson", 2016, "Biology", 4),
-        ("The Selfish Gene", "Richard Dawkins", "9780198788607", "Oxford University Press", 2016, "Biology", 2),
-        ("A Brief History of Time", "Stephen Hawking", "9780553380163", "Bantam Books", 1998, "Physics", 3),
-        ("Principles of Economics", "N. Gregory Mankiw", "9781305585126", "Cengage Learning", 2017, "Economics", 4),
-        ("Freakonomics", "Steven D. Levitt", "9780061234002", "William Morrow", 2009, "Economics", 2),
-        ("The Republic", "Plato", "9780140455113", "Penguin Classics", 2007, "Philosophy", 2),
-        ("Meditations", "Marcus Aurelius", "9780140449334", "Penguin Classics", 2006, "Philosophy", 2),
-        ("A People's History of the United States", "Howard Zinn", "9780062397348", "Harper Perennial", 2015, "History", 3),
-        ("Sapiens: A Brief History of Humankind", "Yuval Noah Harari", "9780062316097", "Harper", 2015, "History", 4),
-        ("To Kill a Mockingbird", "Harper Lee", "9780061120084", "Harper Perennial", 2006, "Literature", 3),
-        ("1984", "George Orwell", "9780451524935", "Signet Classics", 1961, "Literature", 5),
-        ("Pride and Prejudice", "Jane Austen", "9780141439518", "Penguin Classics", 2003, "Literature", 3),
-        ("The Elements of Style", "William Strunk Jr.", "9780205309023", "Pearson", 1999, "Language", 2),
+        ("Introduction to Algorithms", "Thomas H. Cormen", "9780262033848", "MIT Press", 2009, "Computer Science", "Textbook", 4),
+        ("Clean Code", "Robert C. Martin", "9780132350884", "Prentice Hall", 2008, "Computer Science", "Non-Fiction", 3),
+        ("Design Patterns", "Erich Gamma", "9780201633610", "Addison-Wesley", 1994, "Computer Science", "Reference", 2),
+        ("Structure and Interpretation of Computer Programs", "Harold Abelson", "9780262510875", "MIT Press", 1996, "Computer Science", "Textbook", 2),
+        ("Database System Concepts", "Abraham Silberschatz", "9780078022159", "McGraw-Hill", 2019, "Computer Science", "Textbook", 3),
+        ("Calculus", "James Stewart", "9781285740621", "Cengage Learning", 2015, "Mathematics", "Textbook", 5),
+        ("Linear Algebra Done Right", "Sheldon Axler", "9783319110790", "Springer", 2015, "Mathematics", "Textbook", 3),
+        ("Introduction to Probability", "Joseph K. Blitzstein", "9781466575578", "CRC Press", 2014, "Mathematics", "Textbook", 2),
+        ("Discrete Mathematics and Its Applications", "Kenneth Rosen", "9780073383095", "McGraw-Hill", 2012, "Mathematics", "Textbook", 4),
+        ("Physics for Scientists and Engineers", "Raymond Serway", "9781133947271", "Cengage Learning", 2013, "Physics", "Textbook", 3),
+        ("Cosmos", "Carl Sagan", "9780345539434", "Ballantine Books", 2013, "Physics", "Non-Fiction", 2),
+        ("Organic Chemistry", "Paula Yurkanis Bruice", "9780134042282", "Pearson", 2016, "Chemistry", "Textbook", 3),
+        ("Campbell Biology", "Lisa A. Urry", "9780134093413", "Pearson", 2016, "Biology", "Textbook", 4),
+        ("The Selfish Gene", "Richard Dawkins", "9780198788607", "Oxford University Press", 2016, "Biology", "Non-Fiction", 2),
+        ("A Brief History of Time", "Stephen Hawking", "9780553380163", "Bantam Books", 1998, "Physics", "Non-Fiction", 3),
+        ("Principles of Economics", "N. Gregory Mankiw", "9781305585126", "Cengage Learning", 2017, "Economics", "Textbook", 4),
+        ("Freakonomics", "Steven D. Levitt", "9780061234002", "William Morrow", 2009, "Economics", "Non-Fiction", 2),
+        ("The Republic", "Plato", "9780140455113", "Penguin Classics", 2007, "Philosophy", "Non-Fiction", 2),
+        ("Meditations", "Marcus Aurelius", "9780140449334", "Penguin Classics", 2006, "Philosophy", "Non-Fiction", 2),
+        ("A People's History of the United States", "Howard Zinn", "9780062397348", "Harper Perennial", 2015, "History", "Non-Fiction", 3),
+        ("Sapiens: A Brief History of Humankind", "Yuval Noah Harari", "9780062316097", "Harper", 2015, "History", "Non-Fiction", 4),
+        ("To Kill a Mockingbird", "Harper Lee", "9780061120084", "Harper Perennial", 2006, "Literature", "Fiction", 3),
+        ("1984", "George Orwell", "9780451524935", "Signet Classics", 1961, "Literature", "Science Fiction", 5),
+        ("Pride and Prejudice", "Jane Austen", "9780141439518", "Penguin Classics", 2003, "Literature", "Romance", 3),
+        ("The Elements of Style", "William Strunk Jr.", "9780205309023", "Pearson", 1999, "Language", "Reference", 2),
+        ("And Then There Were None", "Agatha Christie", "9780062073488", "William Morrow", 2011, "Literature", "Mystery", 3),
+        ("Dune", "Frank Herbert", "9780441172719", "Ace Books", 1990, "Literature", "Science Fiction", 3),
+        ("The Hobbit", "J.R.R. Tolkien", "9780547928227", "Houghton Mifflin", 2012, "Literature", "Fantasy", 4),
+        ("Long Walk to Freedom", "Nelson Mandela", "9780316548182", "Back Bay Books", 1995, "History", "Biography", 2),
     ]
 
     rows = [
-        (title, author, isbn, publisher, year, category, total, total)
-        for (title, author, isbn, publisher, year, category, total) in sample_books
+        (title, author, isbn, publisher, year, category, genre, total, total)
+        for (title, author, isbn, publisher, year, category, genre, total) in sample_books
     ]
     cursor.executemany(
         """
-        INSERT INTO books (title, author, isbn, publisher, year, category, total_copies, available_copies)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO books (title, author, isbn, publisher, year, category, genre, total_copies, available_copies)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
@@ -238,13 +296,11 @@ def authenticate_user(username: str, password: str):
 
 
 def get_all_patrons():
-    """Return all users with the 'patron' role, ordered by full name."""
+    """Return all users with the 'patron' role, ordered by id ascending."""
     connection = get_connection()
     try:
         cursor = connection.cursor()
-        cursor.execute(
-            "SELECT * FROM users WHERE role = 'patron' ORDER BY full_name COLLATE NOCASE"
-        )
+        cursor.execute("SELECT * FROM users WHERE role = 'patron' ORDER BY id ASC")
         return cursor.fetchall()
     finally:
         connection.close()
@@ -280,17 +336,17 @@ def username_exists(username: str, exclude_id: int = None) -> bool:
         connection.close()
 
 
-def add_patron(username, password_hash, full_name, email, student_id, contact) -> int:
+def add_patron(username, password_hash, full_name, email, student_id, contact, patron_type) -> int:
     """Insert a new patron and return the new row id."""
     connection = get_connection()
     try:
         cursor = connection.cursor()
         cursor.execute(
             """
-            INSERT INTO users (username, password, role, full_name, email, student_id, contact)
-            VALUES (?, ?, 'patron', ?, ?, ?, ?)
+            INSERT INTO users (username, password, role, full_name, email, student_id, contact, patron_type)
+            VALUES (?, ?, 'patron', ?, ?, ?, ?, ?)
             """,
-            (username, password_hash, full_name, email, student_id, contact),
+            (username, password_hash, full_name, email, student_id, contact, patron_type),
         )
         connection.commit()
         return cursor.lastrowid
@@ -298,7 +354,7 @@ def add_patron(username, password_hash, full_name, email, student_id, contact) -
         connection.close()
 
 
-def update_patron(user_id, full_name, email, student_id, contact, password_hash=None):
+def update_patron(user_id, full_name, email, student_id, contact, patron_type, password_hash=None):
     """Update a patron's details. Password is only updated if provided."""
     connection = get_connection()
     try:
@@ -307,19 +363,19 @@ def update_patron(user_id, full_name, email, student_id, contact, password_hash=
             cursor.execute(
                 """
                 UPDATE users
-                SET full_name = ?, email = ?, student_id = ?, contact = ?, password = ?
+                SET full_name = ?, email = ?, student_id = ?, contact = ?, patron_type = ?, password = ?
                 WHERE id = ?
                 """,
-                (full_name, email, student_id, contact, password_hash, user_id),
+                (full_name, email, student_id, contact, patron_type, password_hash, user_id),
             )
         else:
             cursor.execute(
                 """
                 UPDATE users
-                SET full_name = ?, email = ?, student_id = ?, contact = ?
+                SET full_name = ?, email = ?, student_id = ?, contact = ?, patron_type = ?
                 WHERE id = ?
                 """,
-                (full_name, email, student_id, contact, user_id),
+                (full_name, email, student_id, contact, patron_type, user_id),
             )
         connection.commit()
     finally:
@@ -340,6 +396,20 @@ def patron_has_active_borrowings(user_id: int) -> bool:
         connection.close()
 
 
+def get_active_loans_count(user_id: int) -> int:
+    """Return the number of books a patron currently has checked out."""
+    connection = get_connection()
+    try:
+        cursor = connection.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) AS count FROM transactions WHERE user_id = ? AND status = 'borrowed'",
+            (user_id,),
+        )
+        return cursor.fetchone()["count"]
+    finally:
+        connection.close()
+
+
 def delete_patron(user_id: int):
     """Delete a patron. Caller must first check patron_has_active_borrowings."""
     connection = get_connection()
@@ -356,18 +426,18 @@ def delete_patron(user_id: int):
 # ---------------------------------------------------------------------------
 
 def get_all_books():
-    """Return all books ordered by title."""
+    """Return all books ordered by id ascending."""
     connection = get_connection()
     try:
         cursor = connection.cursor()
-        cursor.execute("SELECT * FROM books ORDER BY title COLLATE NOCASE")
+        cursor.execute("SELECT * FROM books ORDER BY id ASC")
         return cursor.fetchall()
     finally:
         connection.close()
 
 
 def search_books(search_term: str):
-    """Search books by title, author, ISBN or category (case-insensitive)."""
+    """Search books by title, author, ISBN or category, ordered by id ascending."""
     connection = get_connection()
     try:
         cursor = connection.cursor()
@@ -375,10 +445,10 @@ def search_books(search_term: str):
         cursor.execute(
             """
             SELECT * FROM books
-            WHERE title LIKE ? OR author LIKE ? OR isbn LIKE ? OR category LIKE ?
-            ORDER BY title COLLATE NOCASE
+            WHERE title LIKE ? OR author LIKE ? OR isbn LIKE ? OR category LIKE ? OR genre LIKE ?
+            ORDER BY id ASC
             """,
-            (term, term, term, term),
+            (term, term, term, term, term),
         )
         return cursor.fetchall()
     finally:
@@ -413,17 +483,17 @@ def isbn_exists(isbn: str, exclude_id: int = None) -> bool:
         connection.close()
 
 
-def add_book(title, author, isbn, publisher, year, category, total_copies) -> int:
+def add_book(title, author, isbn, publisher, year, category, genre, total_copies) -> int:
     """Insert a new book (available_copies starts equal to total_copies)."""
     connection = get_connection()
     try:
         cursor = connection.cursor()
         cursor.execute(
             """
-            INSERT INTO books (title, author, isbn, publisher, year, category, total_copies, available_copies)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO books (title, author, isbn, publisher, year, category, genre, total_copies, available_copies)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (title, author, isbn, publisher, year, category, total_copies, total_copies),
+            (title, author, isbn, publisher, year, category, genre, total_copies, total_copies),
         )
         connection.commit()
         return cursor.lastrowid
@@ -431,7 +501,7 @@ def add_book(title, author, isbn, publisher, year, category, total_copies) -> in
         connection.close()
 
 
-def update_book(book_id, title, author, isbn, publisher, year, category, total_copies):
+def update_book(book_id, title, author, isbn, publisher, year, category, genre, total_copies):
     """Update a book's details.
 
     ``available_copies`` is adjusted by the same delta as
@@ -449,16 +519,16 @@ def update_book(book_id, title, author, isbn, publisher, year, category, total_c
             raise ValueError("Book not found.")
 
         delta = total_copies - row["total_copies"]
-        new_available = max(0, row["available_copies"] + delta)
+        new_available = max(0, min(total_copies, row["available_copies"] + delta))
 
         cursor.execute(
             """
             UPDATE books
             SET title = ?, author = ?, isbn = ?, publisher = ?, year = ?,
-                category = ?, total_copies = ?, available_copies = ?
+                category = ?, genre = ?, total_copies = ?, available_copies = ?
             WHERE id = ?
             """,
-            (title, author, isbn, publisher, year, category, total_copies, new_available, book_id),
+            (title, author, isbn, publisher, year, category, genre, total_copies, new_available, book_id),
         )
         connection.commit()
     finally:
@@ -491,7 +561,7 @@ def delete_book(book_id: int):
 
 
 def get_distinct_categories():
-    """Return a sorted list of distinct book categories."""
+    """Return a sorted list of distinct book categories currently in use."""
     connection = get_connection()
     try:
         cursor = connection.cursor()
@@ -508,16 +578,43 @@ def get_distinct_categories():
 def checkout_book(user_id: int, book_id: int, checkout_date: str, due_date: str) -> int:
     """Record a checkout: insert a transaction and decrement available copies.
 
+    The patron's borrowing policy (looked up from their ``patron_type``)
+    is enforced here: a checkout is refused once the patron already has
+    ``max_loans`` active loans, and refused if the book has no available
+    copies.
+
     Raises:
-        ValueError: If the book has no available copies.
+        ValueError: If the book has no available copies, the patron
+            does not exist, or the patron has reached their maximum
+            number of simultaneous active loans.
     """
+    from utils import get_policy
+
     connection = get_connection()
     try:
         cursor = connection.cursor()
+
         cursor.execute("SELECT available_copies FROM books WHERE id = ?", (book_id,))
-        row = cursor.fetchone()
-        if row is None or row["available_copies"] <= 0:
+        book_row = cursor.fetchone()
+        if book_row is None or book_row["available_copies"] <= 0:
             raise ValueError("No available copies for this book.")
+
+        cursor.execute("SELECT patron_type FROM users WHERE id = ?", (user_id,))
+        user_row = cursor.fetchone()
+        if user_row is None:
+            raise ValueError("Selected patron does not exist.")
+
+        policy = get_policy(user_row["patron_type"])
+        cursor.execute(
+            "SELECT COUNT(*) AS count FROM transactions WHERE user_id = ? AND status = 'borrowed'",
+            (user_id,),
+        )
+        active_loans = cursor.fetchone()["count"]
+        if active_loans >= policy["max_loans"]:
+            raise ValueError(
+                f"This patron has reached the maximum of {policy['max_loans']} "
+                f"active loans allowed for {policy['label']} accounts."
+            )
 
         cursor.execute(
             """
@@ -566,19 +663,20 @@ def return_book(transaction_id: int, return_date: str, fine: float):
 
 
 def get_active_transactions():
-    """Return all currently-borrowed transactions with book/patron details."""
+    """Return all currently-borrowed transactions with book/patron details, ordered by id ascending."""
     connection = get_connection()
     try:
         cursor = connection.cursor()
         cursor.execute(
             """
             SELECT t.*, b.title AS book_title, b.isbn AS book_isbn,
-                   u.full_name AS patron_name, u.student_id AS student_id
+                   u.full_name AS patron_name, u.student_id AS student_id,
+                   u.patron_type AS patron_type
             FROM transactions t
             JOIN books b ON b.id = t.book_id
             JOIN users u ON u.id = t.user_id
             WHERE t.status = 'borrowed'
-            ORDER BY t.due_date ASC
+            ORDER BY t.id ASC
             """
         )
         return cursor.fetchall()
@@ -587,7 +685,7 @@ def get_active_transactions():
 
 
 def get_overdue_transactions():
-    """Return all currently-borrowed transactions whose due date has passed."""
+    """Return all currently-borrowed transactions whose due date has passed, ordered by id ascending."""
     from utils import today_str
 
     connection = get_connection()
@@ -597,12 +695,12 @@ def get_overdue_transactions():
             """
             SELECT t.*, b.title AS book_title, b.isbn AS book_isbn,
                    u.full_name AS patron_name, u.student_id AS student_id,
-                   u.contact AS patron_contact
+                   u.contact AS patron_contact, u.patron_type AS patron_type
             FROM transactions t
             JOIN books b ON b.id = t.book_id
             JOIN users u ON u.id = t.user_id
             WHERE t.status = 'borrowed' AND t.due_date < ?
-            ORDER BY t.due_date ASC
+            ORDER BY t.id ASC
             """,
             (today_str(),),
         )
@@ -612,17 +710,18 @@ def get_overdue_transactions():
 
 
 def get_transaction_history(limit: int = None):
-    """Return all transactions (borrowed and returned) with details, most recent first."""
+    """Return all transactions (borrowed and returned) with details, ordered by id ascending."""
     connection = get_connection()
     try:
         cursor = connection.cursor()
         query = """
             SELECT t.*, b.title AS book_title, b.isbn AS book_isbn,
-                   u.full_name AS patron_name, u.student_id AS student_id
+                   u.full_name AS patron_name, u.student_id AS student_id,
+                   u.patron_type AS patron_type
             FROM transactions t
             JOIN books b ON b.id = t.book_id
             JOIN users u ON u.id = t.user_id
-            ORDER BY t.checkout_date DESC, t.id DESC
+            ORDER BY t.id ASC
         """
         if limit:
             query += f" LIMIT {int(limit)}"
@@ -633,7 +732,7 @@ def get_transaction_history(limit: int = None):
 
 
 def get_transactions_for_user(user_id: int):
-    """Return all transactions for a specific patron, most recent first."""
+    """Return all transactions for a specific patron, ordered by id ascending."""
     connection = get_connection()
     try:
         cursor = connection.cursor()
@@ -643,7 +742,7 @@ def get_transactions_for_user(user_id: int):
             FROM transactions t
             JOIN books b ON b.id = t.book_id
             WHERE t.user_id = ?
-            ORDER BY t.checkout_date DESC, t.id DESC
+            ORDER BY t.id ASC
             """,
             (user_id,),
         )
@@ -653,12 +752,12 @@ def get_transactions_for_user(user_id: int):
 
 
 def get_available_books_for_checkout():
-    """Return books that currently have at least one available copy."""
+    """Return books that currently have at least one available copy, ordered by id ascending."""
     connection = get_connection()
     try:
         cursor = connection.cursor()
         cursor.execute(
-            "SELECT * FROM books WHERE available_copies > 0 ORDER BY title COLLATE NOCASE"
+            "SELECT * FROM books WHERE available_copies > 0 ORDER BY id ASC"
         )
         return cursor.fetchall()
     finally:
